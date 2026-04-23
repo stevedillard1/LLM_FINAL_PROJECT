@@ -19,10 +19,10 @@ This project tests whether Sparse Autoencoders (SAEs) can selectively corrupt fa
     ├── experiment.py        # Core logic: feature identification, hooks, evaluation
     ├── data.py              # All I/O: model/SAE loading, dataset loading from disk
     ├── download_data.py     # Run once to cache datasets locally
-    ├── results.json         # Output from the last experiment run
-    ├── pyproject.toml     # Python dependencies
-    ├── WRITEUP.md           # Full project writeup
-    └── README.md            # This file
+├── results.json         # Output from the last experiment run
+├── pyproject.toml     # Python dependencies
+├── WRITEUP.md           # Full project writeup
+└── README.md            # This file
 ```
 
 ---
