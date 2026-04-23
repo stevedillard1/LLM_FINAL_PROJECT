@@ -10,13 +10,13 @@ LLM Interpretability — Final Project
 
 Most interpretability research on large language models asks how to make models more
 reliable and less prone to hallucination. This project inverts that question entirely:
-can we use Sparse Autoencoders (SAEs) to *deliberately* sever a model's connection to
+can I use Sparse Autoencoders (SAEs) to *deliberately* sever a model's connection to
 factual knowledge while keeping its language capabilities intact?
 
 The practical motivation is not to build a worse model, but to use targeted corruption
-as a diagnostic tool. If we can identify and suppress the features responsible for
+as a diagnostic tool. If I can identify and suppress the features responsible for
 factual recall, it provides strong evidence that those features are doing real
-interpretable work in the model's representation space. If we cannot, that is equally
+interpretable work in the model's representation space. If I cannot, that is equally
 informative — it suggests factual knowledge is not cleanly localized and may be more
 distributed than current SAE research implies.
 
@@ -38,19 +38,19 @@ identify and target factual features.
 conceptual relative. Anthropic showed that clamping a single SAE feature — the "Golden
 Gate Bridge" feature in Claude 3 Sonnet — to a high constant value persistently biased
 the model's behavior across all outputs. This project is the adversarial inverse:
-rather than amplifying one feature to steer the model, we suppress an entire class of
+rather than amplifying one feature to steer the model, I suppress an entire class of
 features to degrade factual recall.
 
 **Representation Engineering (Zou et al., 2023)** identified "truth directions" in
 residual stream activations using linear probes trained on true/false statement pairs.
 This is directly relevant as an independent method for validating that the SAE features
-we identify actually correspond to factual encoding rather than correlated syntactic or
+I identify actually correspond to factual encoding rather than correlated syntactic or
 domain features.
 
 **ROME and MEMIT (Meng et al., 2022/2023)** demonstrated via causal tracing that
 factual associations in GPT-style models are largely localized to specific mid-layer
 MLP computations, and can be precisely edited. This project can be thought of as
-anti-MEMIT: rather than inserting factual memories, we are attempting to erase them.
+anti-MEMIT: rather than inserting factual memories, I are attempting to erase them.
 ROME's causal tracing methodology also informs which layers to target.
 
 **Hallucination reduction work** (RLFT, Goodfire AI 2025; various RAG and calibration
@@ -72,9 +72,9 @@ Pythia-1.4B on a GPU.
 
 ### 3.2 Feature Identification
 
-To identify factual features, we run the model on 200 TriviaQA training examples
-formatted as `"Question: X\nAnswer: Y"`. For each example we capture SAE feature
-activations at the hook layer, averaged over sequence positions. We then accumulate a
+To identify factual features, I ran the model on 200 TriviaQA training examples
+formatted as `"Question: X\nAnswer: Y"`. For each example I captured SAE feature
+activations at the hook layer, averaged over sequence positions. I then accumulated a
 mean activation vector across all examples and return the top-k most consistently
 activated feature indices as our "factual feature set."
 
@@ -86,7 +86,7 @@ encode factual *correctness* rather than just factual *content*.
 
 ### 3.3 Interventions
 
-We implement one intervention for the baseline experiment: **suppression**, which
+I implemented one intervention for the baseline experiment: **suppression**, which
 zeroes out the target features at inference time via a TransformerLens forward hook:
 
 ```
@@ -151,12 +151,9 @@ across versions. The correct release name (`pythia-70m-deduped-res-sm`) was iden
 by querying the installed library's registry directly rather than relying on
 documentation.
 
-**Feature identification is a mean-activation heuristic.** The current approach flags
-features that are on average most active across factual QA prompts. This is a
-reasonable first approximation but likely captures some domain or syntactic features
-that correlate with factual content rather than encoding factual correctness directly.
-The control condition provides a partial guard against this, but a contrastive probe
-would be more principled.
+**Feature identification.** The current approach flags across factual QA prompts. This is a
+reasonable first attempt but did not yeild good results.Using true / false questions could
+help identifying the truth centers more effectively.
 
 ### 4.3 What Would Change Our Interpretation
 
@@ -164,39 +161,34 @@ The hypothesis predicts: `targeted_accuracy << control_accuracy`, with perplexit
 remaining roughly flat. Three alternative outcomes and their implications:
 
 **Targeted ≈ control:** Feature identification is not working. The top-k by mean
-activation is the wrong selection criterion. Next step: switch to a contrastive
-approach (true vs. false statement activation differences) or target a different layer.
+activation is the wrong selection criterion. 
 
 **Both targeted and control drop sharply vs. baseline:** Residual stream interference
 from the encode-decode cycle is degrading the model regardless of which features are
-zeroed. Next step: use `sae.use_error_term = True` to preserve the original residual
-and only subtract the contribution of targeted features.
+zeroed. 
 
 **Targeted drops but perplexity also spikes:** Factual and fluency features are
-entangled at this layer. Next step: try a later layer (layer 5 in Pythia-70m) where
-representations are more semantic, or switch from activation patching to weight editing
-via `sae.W_dec`.
-
+entangled at this layer. Could try another layer
 ---
 
 ## 5. Remaining Experiments
 
 In rough priority order:
 
-**Quantitative baseline results** — complete a full 100-sample evaluation run and
+**Quantitative baseline results:** complete a full 100-sample evaluation run and
 populate the results table above.
 
-**Contrastive feature identification** — replace the mean-activation heuristic with a
+**Contrastive feature identification:** replace the mean-activation heuristic with a
 probe trained on the activation difference between true and false answers on the same
 questions. This more directly targets features encoding factual *correctness*.
 
-**Layer sweep** — run the suppression experiment at each of the 6 residual stream hook
+**Layer sweep:** run the suppression experiment at each of the 6 residual stream hook
 points in Pythia-70m to see which layer shows the largest targeted/control gap.
 
-**Scale to Pythia-1.4B** — run the full experiment on the originally intended model on
+**Scale to Pythia-1.4B:** run the full experiment on the originally intended model on
 a GPU, using the `pythia-1.4b-deduped` SAE release.
 
-**Noise and swap interventions** — the codebase has hooks for noise injection and
+**Noise and swap interventions:** the codebase has hooks for noise injection and
 feature swapping already designed; implement and compare against suppression.
 
 ---
