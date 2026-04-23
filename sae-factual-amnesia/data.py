@@ -21,9 +21,9 @@ from transformers import AutoTokenizer
 # Constants — edit these to swap model/layer
 # ---------------------------------------------------------------------------
 
-MODEL_ID    = "EleutherAI/pythia-1.4b"
-SAE_RELEASE = "pythia-1.4b-deduped"
-SAE_HOOK    = "blocks.12.hook_resid_post"   # mid-late layer; change to experiment
+MODEL_ID    = "EleutherAI/pythia-70m-deduped"
+SAE_RELEASE = "pythia-70m-deduped-res-sm"
+SAE_HOOK    = "blocks.3.hook_resid_post"
 
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 DATA_DIR = Path("data")
