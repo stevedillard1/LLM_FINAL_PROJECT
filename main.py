@@ -17,12 +17,22 @@ Usage:
     python main.py --n-profile 500 --n-eval 200 --top-k 100
 """
 
-import argparse
-import json
-import random
-from pathlib import Path
+import sys
+print("Python started, loading imports...", flush=True)
 
+import os
+os.environ["TRANSFORMERS_VERBOSITY"] = "info"   # shows download progress before anything else
+
+print("Importing torch (this can take 1-2 min on first run)...", flush=True)
 import torch
+print("torch loaded. Importing transformers...", flush=True)
+import json
+from pathlib import Path
+print("All imports done.\n", flush=True)
+
+import argparse
+import random
+
 
 from data import load_model_and_sae, load_trivia_train, load_trivia_val, load_wikitext
 from experiment import (
