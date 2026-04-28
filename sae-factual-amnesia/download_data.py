@@ -1,53 +1,72 @@
 """
-download_data.py — Run this once to cache datasets locally
-===========================================================
-Saves TriviaQA and WikiText to disk so experiment runs don't
-re-download from HuggingFace every time.
+download_data.py — Run once to cache datasets locally
+=======================================================
+Saves TruthfulQA (multiple-choice) and WikiText to disk so
+experiment runs don't re-download from HuggingFace every time.
 
 Usage:
     python download_data.py
-
-    # Optional: control how many samples to save
-    python download_data.py --n-trivia-train 1000 --n-trivia-val 500 --n-wiki 200
-
-Output files (in ./data/):
-    data/trivia_train.json   — for feature profiling
-    data/trivia_val.json     — for evaluation
-    data/wikitext.json       — for perplexity
 """
 
-import argparse
 import json
+import random
 from pathlib import Path
-
 from datasets import load_dataset
 
 DATA_DIR = Path("data")
+SEED     = 42
 
 
-def download_trivia_qa(split: str, n: int, out_path: Path):
-    print(f"[download] TriviaQA {split} ({n} samples) → {out_path}")
-    dataset = load_dataset("trivia_qa", "rc.nocontext", split=split, streaming=True)
+def download_truthful_qa(out_path: Path):
+    """
+    Download TruthfulQA and reformat into 4-choice MC items.
+
+    TruthfulQA's multiple_choice split provides mc1_targets (single correct
+    answer). We use mc1 since it maps cleanly to a single correct letter,
+    which is what the log-prob scorer in experiment.py expects.
+
+    Each saved item:
+        { "question": str, "choices": [A, B, C, D], "label": int (0-3) }
+    """
+    print("[download] Loading TruthfulQA...")
+    dataset = load_dataset("truthful_qa", "multiple_choice", split="validation")
 
     items = []
-    for item in dataset:
-        if len(items) >= n:
-            break
-        # Only keep the fields we actually use
+    rng   = random.Random(SEED)
+
+    for row in dataset:
+        mc      = row["mc1_targets"]
+        choices = list(mc["choices"])
+        labels  = list(mc["labels"])
+        correct = labels.index(1)
+
+        # Pad to exactly 4 choices if needed (rare edge case)
+        wrong = [c for i, c in enumerate(choices) if i != correct]
+        while len(choices) < 4:
+            choices.append(rng.choice(wrong))
+            labels.append(0)
+        choices = choices[:4]
+        labels  = labels[:4]
+
+        # Shuffle so the correct answer isn't always position 0
+        combined = list(zip(choices, labels))
+        rng.shuffle(combined)
+        choices, labels = zip(*combined)
+        correct = list(labels).index(1)
+
         items.append({
-            "question": item["question"],
-            "answer": {
-                "value":   item["answer"]["value"],
-                "aliases": item["answer"]["aliases"],
-            }
+            "question": row["question"],
+            "choices":  list(choices),
+            "label":    correct,
         })
 
     out_path.write_text(json.dumps(items, indent=2))
-    print(f"  Saved {len(items)} items.")
+    print(f"  Saved {len(items)} items to {out_path}")
 
 
 def download_wikitext(n: int, out_path: Path):
-    print(f"[download] WikiText-103 ({n} paragraphs) → {out_path}")
+    """Save n non-empty WikiText-103 paragraphs for perplexity measurement."""
+    print(f"[download] Loading WikiText-103 ({n} paragraphs)...")
     dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="test", streaming=True)
 
     texts = []
@@ -58,25 +77,13 @@ def download_wikitext(n: int, out_path: Path):
             texts.append(item["text"])
 
     out_path.write_text(json.dumps(texts, indent=2))
-    print(f"  Saved {len(texts)} paragraphs.")
+    print(f"  Saved {len(texts)} paragraphs to {out_path}")
 
 
 def main():
-    p = argparse.ArgumentParser(description="Download and cache datasets locally")
-    p.add_argument("--n-trivia-train", type=int, default=1000,
-                   help="TriviaQA train samples (used for feature profiling).")
-    p.add_argument("--n-trivia-val",   type=int, default=500,
-                   help="TriviaQA validation samples (used for evaluation).")
-    p.add_argument("--n-wiki",         type=int, default=200,
-                   help="WikiText paragraphs (used for perplexity).")
-    args = p.parse_args()
-
     DATA_DIR.mkdir(exist_ok=True)
-
-    download_trivia_qa("train",      args.n_trivia_train, DATA_DIR / "trivia_train.json")
-    download_trivia_qa("validation", args.n_trivia_val,   DATA_DIR / "trivia_val.json")
-    download_wikitext(args.n_wiki,                        DATA_DIR / "wikitext.json")
-
+    download_truthful_qa(DATA_DIR / "truthful_qa.json")
+    download_wikitext(200, DATA_DIR / "wikitext.json")
     print("\n[download] Done. Run 'python main.py' to start the experiment.")
 
 

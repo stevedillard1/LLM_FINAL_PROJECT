@@ -2,12 +2,12 @@
 experiment.py — Core experiment logic
 ======================================
 Three steps:
-  1. identify_factual_features  — find which SAE features activate on correct answers
-  2. make_suppression_hook      — build a hook that zeroes those features at inference time
+  1. identify_factual_features  — find SAE features that activate on correct MC answers
+  2. make_suppression_hook      — zero out those features at inference time
   3. run_evaluation             — compare baseline vs. targeted vs. random-control
 
-This is the v1 (basic) implementation. Only suppression is implemented here.
-Noise injection and feature swapping can be added later as separate hook factories.
+Evaluation uses multiple-choice scoring (log-prob of each choice token) instead
+of free-text generation, so even smaller models produce measurable baseline accuracy.
 """
 
 import random
@@ -18,6 +18,8 @@ import torch
 
 from data import SAE_HOOK, DEVICE
 
+LETTERS = ["A", "B", "C", "D"]
+
 
 # ---------------------------------------------------------------------------
 # Step 1: Feature Identification
@@ -26,49 +28,58 @@ from data import SAE_HOOK, DEVICE
 def get_feature_activations(model, sae, tokens: torch.Tensor) -> torch.Tensor:
     """
     Run one forward pass and return mean SAE feature activations over the sequence.
-
     Returns: Tensor of shape (d_sae,)
     """
     with torch.no_grad():
         _, cache = model.run_with_cache(tokens, names_filter=SAE_HOOK)
-        resid = cache[SAE_HOOK]               # (batch, seq, d_model)
-        feature_acts = sae.encode(resid)      # (batch, seq, d_sae)
-        return feature_acts[0].mean(dim=0)    # (d_sae,)  — average over seq positions
+        resid        = cache[SAE_HOOK]           # (batch, seq, d_model)
+        feature_acts = sae.encode(resid)         # (batch, seq, d_sae)
+        return feature_acts[0].mean(dim=0)       # (d_sae,)
 
 
 def identify_factual_features(
     model,
     sae,
     tokenizer,
-    trivia_items: list[dict],
+    items: list[dict],
     top_k: int = 50,
 ) -> list[int]:
     """
-    Find the SAE features that activate most strongly on correct TriviaQA answers.
+    Find SAE features that activate most strongly when the model processes
+    the correct answer to a TruthfulQA multiple-choice question.
 
-    For each QA pair we pass the full "Question: X\\nAnswer: Y" string through
-    the model and record the mean feature activation vector. We accumulate a
-    running sum across all items, then return the top-k feature indices.
+    For each item we build a prompt that includes the question + correct answer
+    and record mean SAE activations. We accumulate across all items and return
+    the top-k most consistently activated feature indices.
 
     Args:
-        trivia_items: list of TriviaQA items (from data.load_trivia_qa)
-        top_k:        how many features to flag as "factual"
+        items:  TruthfulQA MC items (from data.load_truthful_qa)
+        top_k:  how many features to flag as factual
 
     Returns:
         List of integer feature indices, length == top_k
     """
-    print(f"[experiment] Profiling factual features over {len(trivia_items)} samples...")
+    print(f"[experiment] Profiling factual features over {len(items)} samples...")
     accumulator = torch.zeros(sae.cfg.d_sae, device=DEVICE)
 
-    for item in trivia_items:
-        prompt = f"Question: {item['question']}\nAnswer: {item['answer']['value']}"
+    for item in items:
+        correct_letter = LETTERS[item["label"]]
+        correct_text   = item["choices"][item["label"]]
+        prompt = (
+            f"Question: {item['question']}\n"
+            f"A) {item['choices'][0]}\n"
+            f"B) {item['choices'][1]}\n"
+            f"C) {item['choices'][2]}\n"
+            f"D) {item['choices'][3]}\n"
+            f"Answer: {correct_letter}) {correct_text}"
+        )
         tokens = tokenizer(
-            prompt, return_tensors="pt", truncation=True, max_length=128
+            prompt, return_tensors="pt", truncation=True, max_length=256
         ).input_ids.to(DEVICE)
 
         accumulator += get_feature_activations(model, sae, tokens)
 
-    mean_acts = accumulator / len(trivia_items)
+    mean_acts        = accumulator / len(items)
     factual_features = mean_acts.topk(top_k).indices.cpu().tolist()
     print(f"[experiment] Top {top_k} feature indices (first 10): {factual_features[:10]}")
     return factual_features
@@ -77,7 +88,7 @@ def identify_factual_features(
 def sample_random_features(sae, n: int, exclude: list[int]) -> list[int]:
     """
     Sample n random feature indices, excluding the factual set.
-    Used for the control condition — suppressing random features instead of factual ones.
+    Used for the control condition.
     """
     exclude_set = set(exclude)
     pool = [i for i in range(sae.cfg.d_sae) if i not in exclude_set]
@@ -85,66 +96,98 @@ def sample_random_features(sae, n: int, exclude: list[int]) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Suppression Hook (v1 intervention)
+# Step 2: Suppression Hook
 # ---------------------------------------------------------------------------
 
 def make_suppression_hook(sae, feature_indices: list[int]):
     """
-    Build a TransformerLens forward hook that suppresses the given SAE features.
+    Build a TransformerLens forward hook that zeroes out the given SAE features.
 
-    At each forward pass the hook:
-      1. Encodes the residual stream through the SAE  → sparse feature activations
-      2. Zeroes out the target feature activations
-      3. Decodes back to residual-stream space
-      4. Returns the corrupted residual, replacing the original
+    At each forward pass:
+      1. Encode residual stream → sparse feature activations
+      2. Zero out target feature activations
+      3. Decode back to residual stream space
+      4. Return corrupted residual, replacing the original
 
     Args:
-        feature_indices: list of SAE feature indices to suppress
+        feature_indices: SAE feature indices to suppress
 
     Returns:
-        A hook function compatible with TransformerLens model.hooks()
+        Hook function compatible with TransformerLens model.hooks()
     """
     feat_tensor = torch.tensor(feature_indices, device=DEVICE)
 
     def hook_fn(resid, hook):
-        # resid shape: (batch, seq, d_model)
+        # resid: (batch, seq, d_model)
         with torch.no_grad():
-            feature_acts = sae.encode(resid)           # (batch, seq, d_sae)
-            feature_acts[:, :, feat_tensor] = 0.0      # zero out target features
-            return sae.decode(feature_acts)             # (batch, seq, d_model)
+            feature_acts = sae.encode(resid)
+            feature_acts[:, :, feat_tensor] = 0.0
+            return sae.decode(feature_acts)
 
     return hook_fn
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Evaluation
+# Step 3: Evaluation — Multiple Choice Log-Prob Scoring
 # ---------------------------------------------------------------------------
 
-def _generate(model, tokenizer, prompt: str, hook_fn=None, max_new_tokens: int = 40) -> str:
-    """Generate a completion, optionally applying a residual-stream hook."""
-    tokens = tokenizer(
-        prompt, return_tensors="pt", truncation=True, max_length=128
-    ).input_ids.to(DEVICE)
+def _mc_predict(model, tokenizer, item: dict, hook_fn=None) -> int:
+    """
+    Score each answer choice by the mean log-probability the model assigns to
+    the full answer text, given only the question as context.
 
-    with torch.no_grad():
-        if hook_fn is None:
-            output = model.generate(tokens, max_new_tokens=max_new_tokens)
-        else:
-            with model.hooks(fwd_hooks=[(SAE_HOOK, hook_fn)]):
-                output = model.generate(tokens, max_new_tokens=max_new_tokens)
+    This is completion scoring: for each choice we build
+        "Question: X\nAnswer: <choice text>"
+    and compute the mean per-token log-prob over the answer tokens only.
+    The choice with the highest score wins.
 
-    generated_ids = output[0, tokens.shape[1]:]
-    return tokenizer.decode(generated_ids, skip_special_tokens=True)
+    This avoids the positional bias problem of letter-token scoring (where small
+    base models default to always picking A) by using the actual answer text as
+    the scoring signal instead of a single letter token.
+    """
+    question_prefix = f"Question: {item['question']}\nAnswer:"
 
+    scores = []
+    for choice in item["choices"]:
+        full_text     = question_prefix + " " + choice
+        full_tokens   = tokenizer(
+            full_text, return_tensors="pt", truncation=True, max_length=256
+        ).input_ids.to(DEVICE)
+        prefix_tokens = tokenizer(
+            question_prefix, return_tensors="pt", truncation=True, max_length=256
+        ).input_ids.to(DEVICE)
 
-def _exact_match(prediction: str, aliases: list[str]) -> bool:
-    """Normalised exact match: does the prediction start with any valid answer?"""
-    pred = prediction.strip().lower()
-    return any(pred.startswith(a.strip().lower()) for a in aliases)
+        n_answer_tokens = full_tokens.shape[1] - prefix_tokens.shape[1]
+
+        # Need at least one answer token to score
+        if n_answer_tokens <= 0:
+            scores.append(-float("inf"))
+            continue
+
+        with torch.no_grad():
+            if hook_fn is None:
+                logits = model(full_tokens)
+            else:
+                with model.hooks(fwd_hooks=[(SAE_HOOK, hook_fn)]):
+                    logits = model(full_tokens)
+
+        # Shift: logits[i] predicts token[i+1]
+        # We want log-probs over the answer tokens only
+        log_probs   = torch.log_softmax(logits[0], dim=-1)  # (seq, vocab)
+        answer_start = prefix_tokens.shape[1] - 1           # position before first answer token
+
+        total_lp = 0.0
+        for pos in range(answer_start, answer_start + n_answer_tokens):
+            target_token = full_tokens[0, pos + 1].item()
+            total_lp    += log_probs[pos, target_token].item()
+
+        scores.append(total_lp / n_answer_tokens)           # mean per-token log-prob
+
+    return int(np.argmax(scores))
 
 
 def _compute_perplexity(model, tokenizer, texts: list[str]) -> float:
-    """Mean per-token perplexity of the *base* model on a list of texts."""
+    """Mean per-token perplexity on a list of texts. Language quality check."""
     total_loss, total_tokens = 0.0, 0
     for text in texts:
         tokens = tokenizer(
@@ -168,23 +211,17 @@ def run_evaluation(
     wiki_texts: list[str],
 ) -> dict:
     """
-    Compare three conditions on factual accuracy and perplexity.
+    Compare three conditions on MC accuracy and perplexity.
 
     Conditions:
         baseline — no intervention
         targeted — factual SAE features suppressed
         control  — equal number of random features suppressed
 
-    Args:
-        factual_features: output of identify_factual_features()
-        random_features:  output of sample_random_features()
-        eval_items:       TriviaQA validation items (from data.load_trivia_qa)
-        wiki_texts:       WikiText paragraphs for perplexity (from data.load_wikitext)
-
     Returns:
         dict with accuracy and perplexity for each condition
     """
-    print(f"\n[experiment] Evaluating {len(eval_items)} TriviaQA samples...")
+    print(f"\n[experiment] Evaluating {len(eval_items)} TruthfulQA MC samples...")
 
     targeted_hook = make_suppression_hook(sae, factual_features)
     control_hook  = make_suppression_hook(sae, random_features)
@@ -192,36 +229,36 @@ def run_evaluation(
     counts = defaultdict(int)
 
     for i, item in enumerate(eval_items):
-        aliases = item["answer"]["aliases"]
-        prompt  = f"Question: {item['question']}\nAnswer:"
+        correct = item["label"]
 
-        base_ans     = _generate(model, tokenizer, prompt)
-        targeted_ans = _generate(model, tokenizer, prompt, hook_fn=targeted_hook)
-        control_ans  = _generate(model, tokenizer, prompt, hook_fn=control_hook)
+        base_pred     = _mc_predict(model, tokenizer, item)
+        targeted_pred = _mc_predict(model, tokenizer, item, hook_fn=targeted_hook)
+        control_pred  = _mc_predict(model, tokenizer, item, hook_fn=control_hook)
 
-        counts["baseline"] += int(_exact_match(base_ans, aliases))
-        counts["targeted"] += int(_exact_match(targeted_ans, aliases))
-        counts["control"]  += int(_exact_match(control_ans, aliases))
+        counts["baseline"] += int(base_pred     == correct)
+        counts["targeted"] += int(targeted_pred == correct)
+        counts["control"]  += int(control_pred  == correct)
 
-        # Print a progress update + a sample output every 10 items
         if (i + 1) % 10 == 0:
             n = i + 1
             print(f"  [{n}/{len(eval_items)}]  "
                   f"base={counts['baseline']/n:.2f}  "
                   f"targeted={counts['targeted']/n:.2f}  "
                   f"control={counts['control']/n:.2f}")
-            print(f"    Q: {item['question'][:60]}")
-            print(f"    baseline → {base_ans[:60]}")
-            print(f"    targeted → {targeted_ans[:60]}")
+            print(f"    Q: {item['question'][:70]}")
+            print(f"    Correct: {LETTERS[correct]})  "
+                  f"Base: {LETTERS[base_pred]})  "
+                  f"Targeted: {LETTERS[targeted_pred]})")
 
     n = len(eval_items)
     print("\n[experiment] Computing perplexity on WikiText-103...")
     ppl = _compute_perplexity(model, tokenizer, wiki_texts)
 
     return {
-        "n_eval":             n,
-        "baseline_accuracy":  counts["baseline"] / n,
-        "targeted_accuracy":  counts["targeted"] / n,
-        "control_accuracy":   counts["control"]  / n,
-        "baseline_ppl":       ppl,
+        "n_eval":            n,
+        "baseline_accuracy": counts["baseline"] / n,
+        "targeted_accuracy": counts["targeted"] / n,
+        "control_accuracy":  counts["control"]  / n,
+        "baseline_ppl":      ppl,
+        "chance_accuracy":   0.25,   # 4-way MC random baseline
     }
