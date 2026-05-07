@@ -21,15 +21,15 @@ from transformers import AutoTokenizer
 # Constants — edit these to swap model/layer
 # ---------------------------------------------------------------------------
 
-# MODEL_ID    = "google/gemma-3-1b-it"
-# SAE_RELEASE = "gemma-scope-2-1b-it-resid_post"
-# SAE_HOOK    = "blocks.12.hook_resid_post"
-# SAE_ID      = "layer_12_width_16k_l0_small"
+MODEL_ID    = "google/gemma-3-1b-it"
+SAE_RELEASE = "gemma-3-1b-res-matryoshka-dc"
+SAE_HOOK    = "blocks.13.hook_resid_post"
+SAE_ID      = "blocks.13.hook_resid_post"
 
-MODEL_ID    = "EleutherAI/pythia-70m-deduped"
-SAE_RELEASE = "pythia-70m-deduped-res-sm"
-SAE_HOOK    = "blocks.3.hook_resid_post"
-SAE_ID      = SAE_HOOK
+# MODEL_ID    = "EleutherAI/pythia-70m-deduped"
+# SAE_RELEASE = "pythia-70m-deduped-res-sm"
+# SAE_HOOK    = "blocks.3.hook_resid_post"
+# SAE_ID      = SAE_HOOK
 
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 DATA_DIR = Path("data")
@@ -61,12 +61,13 @@ def load_model_and_sae():
     Model weights (~2.5GB in float16) are cached by HuggingFace after first
     download at ~/.cache/huggingface.
     """
+    print(f"[data] DEVICE = {DEVICE}")  # add this
+
     print(f"[data] Loading model '{MODEL_ID}' on {DEVICE}...")
-    model = HookedTransformer.from_pretrained(
-        MODEL_ID,
-        device=DEVICE,
-        dtype=torch.float32,   # SAE encode/decode expects float32
-    )
+    model = HookedTransformer.from_pretrained(MODEL_ID, device=DEVICE)
+
+    model = model.to(DEVICE)  # force it explicitly after loading
+
     model.eval()
     print("[data] Model loaded OK.")
 

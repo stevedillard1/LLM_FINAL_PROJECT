@@ -3,7 +3,7 @@
   "baseline_accuracy": 0.21,
   "targeted_accuracy": 0.22,
   "control_accuracy": 0.25,
-  "baseline_ppl": 103.75149783791338,
+  "baseline_ppl": 103.75315144964036,
   "chance_accuracy": 0.25,
   "factual_features": [
     5355,
