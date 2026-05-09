@@ -7,10 +7,10 @@
 # -----------------------------------------------------------------------------
 
 # Gemma-2-4b — best results, needs A10 GPU (24GB VRAM)
-model_id:    "google/gemma-2-9b-it"
-sae_release: "gemma-scope-9b-it-res"
-sae_hook:    "blocks.31.hook_resid_post"
-sae_id:      "layer_31/width_16k/average_l0_43"
+# model_id:    "google/gemma-2-9b-it"
+# sae_release: "gemma-scope-9b-it-res"
+# sae_hook:    "blocks.31.hook_resid_post"
+# sae_id:      "layer_31/width_16k/average_l0_43"
 
 # Gemma-3-1b — newer architecture, fits on most GPUs (8GB+)
 # model_id:    "google/gemma-3-1b-it"
@@ -19,10 +19,10 @@ sae_id:      "layer_31/width_16k/average_l0_43"
 # sae_id:      "blocks.13.hook_resid_post"
 
 # Pythia-70m — CPU-safe, fast, low accuracy — good for smoke testing
-# model_id:    "EleutherAI/pythia-70m-deduped"
-# sae_release: "pythia-70m-deduped-res-sm"
-# sae_hook:    "blocks.3.hook_resid_post"
-# sae_id:      "blocks.3.hook_resid_post"
+model_id:    "EleutherAI/pythia-70m-deduped"
+sae_release: "pythia-70m-deduped-res-sm"
+sae_hook:    "blocks.3.hook_resid_post"
+sae_id:      "blocks.3.hook_resid_post"
 
 # -----------------------------------------------------------------------------
 # Experiment parameters

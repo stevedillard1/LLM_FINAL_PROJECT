@@ -1,12 +1,12 @@
 # Inducing Controlled Factual Amnesia in LLMs
 
-**Steven Dillard** — sole contributor (model setup, data pipeline, experiment design, evaluation, writeup)
+**Steven Dillard** sole contributor (model setup, data pipeline, experiment design, evaluation, writeup)
 
 ---
 
 ## What This Is
 
-This project tests whether Sparse Autoencoders (SAEs) can selectively corrupt factual knowledge in a language model while preserving general language fluency — a kind of simulated semantic amnesia. See [`WRITEUP.md`](WRITEUP.md) for the full project writeup.
+This project tests whether Sparse Autoencoders (SAEs) can selectively corrupt factual knowledge in a language model while preserving general language fluency as a kind of simulated semantic amnesia. See [`WRITEUP.md`](WRITEUP.md) for the full project writeup.
 
 ---
 
@@ -14,59 +14,75 @@ This project tests whether Sparse Autoencoders (SAEs) can selectively corrupt fa
 
 ```
 .
-├── sae-factual-amnesia
-    ├── main.py              # Entry point — wires everything together, CLI args
-    ├── experiment.py        # Core logic: feature identification, hooks, evaluation
-    ├── data.py              # All I/O: model/SAE loading, dataset loading from disk
-    ├── download_data.py     # Run once to cache datasets locally
-├── results.json         # Output from the last experiment run
-├── pyproject.toml     # Python dependencies
-├── WRITEUP.md           # Full project writeup
-└── README.md            # This file
+├── sae-factual-amnesia/
+│   ├── main.py              # Entry point: reads config.yaml, wires everything together
+│   ├── experiment.py        # Core logic: feature identification, hooks, evaluation
+│   ├── data.py              # All I/O: model/SAE loading, dataset loading from disk
+│   ├── download_data.py     # Run once to cache datasets locally
+│   └── config.yaml          # Model selection and experiment parameters ->edit this
+├── results.json             # Output from the last experiment run
+├── pyproject.toml           # Python dependencies (managed by uv)
+├── WRITEUP.md               # Full project writeup
+└── README.md                # This file
 ```
 
 ---
 
-## Setup
+## Setup and Execution
 
 ```bash
-# 1. Create and activate a virtual environment
+# 1. Install dependencies
 uv sync
-source venv/bin/activate        # Windows: venv\Scripts\activate
 
-# 2. Download and cache datasets (run once)
-uv run python download_data.py
+# 2. Set HuggingFace token (required for bigger gated models like Gemma)
+export HF_TOKEN=your_token_here      # Linux/Mac
+set HF_TOKEN=your_token_here         # Windows
 
-# 3. Smoke test — confirms the pipeline runs end to end
-uv run python main.py --smoke-test
+# 3. Download and cache datasets (run once)
+uv run python sae-factual-amnesia/download_data.py
+
+# 4. Smoke test confirms the pipeline runs end to end (~2 min)
+uv run python sae-factual-amnesia/main.py --smoke-test
+
+# 5. Full run (~5 min)
+uv run python sae-factual-amnesia/main.py
 ```
 
-> **Note:** The model (`EleutherAI/pythia-70m-deduped`, ~150MB) is downloaded automatically by HuggingFace on first run and cached in `~/.cache/huggingface`. You do not need to download it manually. Set `HF_TOKEN` in your environment to avoid rate limiting.
+> **Note:** Model weights are downloaded automatically by HuggingFace on first run and cached in `~/.cache/huggingface`. Get a free token at https://huggingface.co/settings/tokens. For Gemma models you must also accept the license at the model's HuggingFace page.
 
 ---
 
-## Running the Experiment
+## Configuration
 
-```bash
-# Standard run (200 profiling samples, 100 eval samples, suppression intervention)
-uv run python main.py
+All model selection and experiment parameters live in `config.yaml`. Edit that file to change the model or scale. No code changes needed.
 
-# Adjust sample counts
-uv run python main.py --n-profile 500 --n-eval 200 --top-k 100
+```yaml
+# Uncomment the model block you want to use:
 
-# Save results to a specific file
-uv run python main.py --output results_run1.json
+# Gemma-2-9b-it best results, needs A10 GPU (24GB VRAM)
+model_id:    "google/gemma-2-9b-it"
+sae_release: "gemma-scope-9b-it-res"
+sae_hook:    "blocks.31.hook_resid_post"
+sae_id:      "layer_31/width_16k/average_l0_43"
+
+# Gemma-3-1b-it lighter, fits on most GPUs (8GB+)
+model_id:    "google/gemma-3-1b-it"
+sae_release: "gemma-3-1b-res-matryoshka-dc"
+sae_hook:    "blocks.13.hook_resid_post"
+sae_id:      "blocks.13.hook_resid_post"
+
+# Pythia-70m CPU-safe, fast, good for smoke testing
+model_id:    "EleutherAI/pythia-70m-deduped"
+sae_release: "pythia-70m-deduped-res-sm"
+sae_hook:    "blocks.3.hook_resid_post"
+sae_id:      "blocks.3.hook_resid_post"
+
+n_profile:  400      # TruthfulQA samples for feature profiling
+n_eval:     417      # TruthfulQA samples for evaluation (max 817 total)
+top_k:      100      # Number of SAE features flagged as factual
+n_wikitext: 100      # WikiText paragraphs for perplexity
+output:     "results.json"
 ```
-
-**CLI options:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--smoke-test` | off | Tiny 5-sample run to verify the pipeline |
-| `--n-profile` | 200 | TriviaQA samples used to identify factual features |
-| `--n-eval` | 100 | TriviaQA samples used for evaluation |
-| `--top-k` | 50 | Number of SAE features flagged as factual |
-| `--output` | `results.json` | Path to save JSON results |
 
 ---
 
@@ -77,26 +93,12 @@ Results are saved to `results.json` after each run. Key fields:
 | Field | What it means |
 |---|---|
 | `baseline_accuracy` | Model accuracy with no intervention |
-| `targeted_accuracy` | Accuracy after suppressing factual features |
-| `control_accuracy` | Accuracy after suppressing random features |
+| `targeted_accuracy` | Accuracy after suppressing factual SAE features |
+| `random_control_accuracy` | Accuracy after suppressing random features |
+| `freq_matched_accuracy` | Accuracy after suppressing frequency-matched features |
 | `baseline_ppl` | WikiText-103 perplexity (language quality check) |
 
 **Interpreting the output:**
-- `targeted_accuracy << control_accuracy` → feature identification is working
-- `targeted_accuracy ≈ control_accuracy` → try adjusting `--top-k` or the SAE layer in `data.py`
-- Perplexity spikes alongside accuracy → factual and fluency features may be entangled
-
----
-
-## Current Model / SAE
-
-Configured in `data.py`:
-
-```python
-MODEL_ID    = "EleutherAI/pythia-70m-deduped"
-SAE_RELEASE = "pythia-70m-deduped-res-sm"
-SAE_HOOK    = "blocks.3.hook_resid_post"
-```
-
-To experiment with a different layer, change `SAE_HOOK`. Valid hook IDs for this release:
-`blocks.0–5.hook_resid_pre` and `blocks.0–5.hook_resid_post`.
+- `targeted_accuracy << freq_matched_accuracy` → feature identification is working, factual features are doing real work
+- `targeted_accuracy ≈ freq_matched_accuracy` → try increasing `top_k` or switching SAE layer in `config.yaml`
+- Perplexity spikes alongside accuracy drop → factual and fluency features may be entangled at this layer
