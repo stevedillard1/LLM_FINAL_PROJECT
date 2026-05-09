@@ -149,6 +149,12 @@ tested: k=100 and k=200.
 | Factual accuracy (TruthfulQA MC) | 0.460 | 0.456 | 0.470 | 0.468 |
 | Perplexity (WikiText-103) | 15.29 | — | — | — |
 
+
+![TruthfulQA results k=100](results_k100.png)
+
+![TruthfulQA results k=200](results_k200.png)
+
+
 Accuracy drops across conditions were less than 1 percentage point in all runs. The
 targeted condition did not outperform either control condition in any experiment.
 
