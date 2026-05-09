@@ -13,6 +13,8 @@ dependencies = [
     "datasets>=2.18.0",
     "numpy>=1.26.0",
     "pyarrow<18.0",
+    "pyyaml>=6.0",
+
 ]
 
 [build-system]

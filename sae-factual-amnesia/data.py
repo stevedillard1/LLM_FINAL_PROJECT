@@ -3,9 +3,8 @@ data.py — Model, SAE, and dataset loading
 ==========================================
 All I/O lives here. experiment.py never touches datasets or model files directly.
 
-Datasets are loaded from local JSON files (written by download_data.py).
-Run download_data.py once before running the experiment:
-    python download_data.py
+Model and SAE are configured in config.yaml.
+Run load_config() before anything else in main.py.
 """
 
 import json
@@ -17,26 +16,54 @@ from transformer_lens import HookedTransformer
 from sae_lens import SAE
 from transformers import AutoTokenizer
 
-# ---------------------------------------------------------------------------
-# Constants — edit these to swap model/layer
-# ---------------------------------------------------------------------------
-
-MODEL_ID    = "google/gemma-3-1b-it"
-SAE_RELEASE = "gemma-3-1b-res-matryoshka-dc"
-SAE_HOOK    = "blocks.13.hook_resid_post"
-SAE_ID      = "blocks.13.hook_resid_post"
-
-# MODEL_ID    = "EleutherAI/pythia-70m-deduped"
-# SAE_RELEASE = "pythia-70m-deduped-res-sm"
-# SAE_HOOK    = "blocks.3.hook_resid_post"
-# SAE_ID      = SAE_HOOK
-
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 DATA_DIR = Path("data")
 
-# Local cache paths written by download_data.py
-TRUTHFUL_QA_PATH  = DATA_DIR / "truthful_qa.json"
-WIKITEXT_PATH     = DATA_DIR / "wikitext.json"
+TRUTHFUL_QA_PATH = DATA_DIR / "truthful_qa.json"
+WIKITEXT_PATH    = DATA_DIR / "wikitext.json"
+
+# Set by load_config() — do not edit these directly, edit config.yaml instead
+MODEL_ID    = None
+SAE_RELEASE = None
+SAE_HOOK    = None
+SAE_ID      = None
+
+
+def load_config(config_path: str = "config.yaml") -> dict:
+    """
+    Read config.yaml and set module-level model constants.
+    Must be called before load_model_and_sae().
+    Returns the full config dict so main.py can read experiment parameters.
+    """
+    global MODEL_ID, SAE_RELEASE, SAE_HOOK, SAE_ID
+
+    try:
+        import yaml
+    except ImportError:
+        print("[data] ERROR: pyyaml not installed. Run: pip install pyyaml")
+        sys.exit(1)
+
+    path = Path(config_path)
+    if not path.exists():
+        print(f"[data] ERROR: config file not found at '{config_path}'")
+        sys.exit(1)
+
+    with open(path) as f:
+        cfg = yaml.safe_load(f)
+
+    for field in ("model_id", "sae_release", "sae_hook", "sae_id"):
+        if field not in cfg:
+            print(f"[data] ERROR: '{field}' missing from {config_path}")
+            sys.exit(1)
+
+    MODEL_ID    = cfg["model_id"]
+    SAE_RELEASE = cfg["sae_release"]
+    SAE_HOOK    = cfg["sae_hook"]
+    SAE_ID      = cfg["sae_id"]
+
+    print(f"[data] Config loaded: model='{MODEL_ID}'")
+    print(f"[data] SAE: {SAE_RELEASE} / {SAE_ID}")
+    return cfg
 
 
 def _check_data_exists():
@@ -45,39 +72,44 @@ def _check_data_exists():
         print("[data] ERROR: Local data files not found:")
         for p in missing:
             print(f"  {p}")
-        print("[data] Run 'python download_data.py' first to cache the datasets.")
+        print("[data] Run 'python download_data.py' first.")
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Model + SAE
-# ---------------------------------------------------------------------------
-
 def load_model_and_sae():
     """
-    Load Gemma-3-1B-IT via TransformerLens and the matching Gemma Scope SAE.
+    Load model via TransformerLens and the matching pretrained SAE.
+    Requires load_config() to have been called first.
     Returns (model, sae, tokenizer).
-
-    Model weights (~2.5GB in float16) are cached by HuggingFace after first
-    download at ~/.cache/huggingface.
     """
-    print(f"[data] DEVICE = {DEVICE}")  # add this
+    if MODEL_ID is None:
+        print("[data] ERROR: load_config() must be called before load_model_and_sae().")
+        sys.exit(1)
 
-    print(f"[data] Loading model '{MODEL_ID}' on {DEVICE}...")
-    model = HookedTransformer.from_pretrained(MODEL_ID, device=DEVICE)
+    print(f"[data] DEVICE = {DEVICE}")
+    print(f"[data] Loading model '{MODEL_ID}'...")
 
-    model = model.to(DEVICE)  # force it explicitly after loading
+    # Use float16 for large models to fit in VRAM, float32 for smaller ones
+    FLOAT16_MODELS = {"google/gemma-2-4b-it", "google/gemma-2-9b-it"}
+    dtype = torch.float16 if MODEL_ID in FLOAT16_MODELS else torch.float32
 
+    model = HookedTransformer.from_pretrained(MODEL_ID, device="cpu", dtype=dtype)
+    model = model.to(DEVICE)
     model.eval()
-    print("[data] Model loaded OK.")
+    print(f"[data] Model loaded OK (dtype={dtype}).")
 
-    print(f"[data] Loading SAE layer '{SAE_ID}'...")
+    # model = HookedTransformer.from_pretrained(MODEL_ID, device="cpu", dtype=torch.float32)
+    # model = model.to(DEVICE)
+    # model.eval()
+    # print("[data] Model loaded OK.")
+
+    print(f"[data] Loading SAE '{SAE_ID}'...")
     try:
         sae, _, _ = SAE.from_pretrained(
-        release=SAE_RELEASE,
-        sae_id=SAE_HOOK,
-        device=DEVICE,
-    )
+            release=SAE_RELEASE,
+            sae_id=SAE_ID,
+            device=DEVICE,
+        )
     except Exception as e:
         print(f"[data] ERROR loading SAE: {type(e).__name__}: {e}")
         raise
@@ -91,20 +123,11 @@ def load_model_and_sae():
     return model, sae, tokenizer
 
 
-# ---------------------------------------------------------------------------
-# Datasets — read from local files cached by download_data.py
-# ---------------------------------------------------------------------------
-
 def load_truthful_qa(n: int) -> list[dict]:
     """
-    Load up to n TruthfulQA multiple-choice items from local cache.
-
-    Each item has:
-        item["question"]  — the question string
-        item["choices"]   — list of 4 answer strings (A/B/C/D)
-        item["label"]     — int index of the correct choice (0-3)
-
-    Used for both feature profiling and evaluation.
+    Load up to n TruthfulQA MC items from local cache.
+    TruthfulQA has 817 questions total.
+    Each item: { "question": str, "choices": [A,B,C,D], "label": int }
     """
     _check_data_exists()
     items = json.loads(TRUTHFUL_QA_PATH.read_text())[:n]
@@ -113,10 +136,7 @@ def load_truthful_qa(n: int) -> list[dict]:
 
 
 def load_wikitext(n: int) -> list[str]:
-    """
-    Load up to n WikiText-103 paragraphs from local cache.
-    Used for perplexity measurement (language quality check).
-    """
+    """Load up to n WikiText-103 paragraphs for perplexity measurement."""
     _check_data_exists()
     texts = json.loads(WIKITEXT_PATH.read_text())[:n]
     print(f"[data] Loaded {len(texts)} WikiText paragraphs from {WIKITEXT_PATH}")
